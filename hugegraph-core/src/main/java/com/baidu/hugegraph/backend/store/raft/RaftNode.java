@@ -41,6 +41,7 @@ import com.alipay.sofa.jraft.error.RaftError;
 import com.alipay.sofa.jraft.option.NodeOptions;
 import com.alipay.sofa.jraft.rpc.ClientService;
 import com.alipay.sofa.jraft.rpc.RpcResponseClosure;
+import com.alipay.sofa.jraft.rpc.RpcServer;
 import com.alipay.sofa.jraft.util.BytesUtil;
 import com.alipay.sofa.jraft.util.Endpoint;
 import com.baidu.hugegraph.backend.BackendException;
@@ -110,10 +111,11 @@ public class RaftNode {
 
         String groupId = this.context.group();
         PeerId endpoint = this.context.endpoint();
+        RpcServer rpcServer = this.context.rpcServer();
         RaftGroupService raftGroupService;
         // Shared rpc server
         raftGroupService = new RaftGroupService(groupId, endpoint, nodeOptions,
-                                                this.context.rpcServer(), true);
+                                                rpcServer, true);
         // Start node
         return raftGroupService.start(false);
     }
