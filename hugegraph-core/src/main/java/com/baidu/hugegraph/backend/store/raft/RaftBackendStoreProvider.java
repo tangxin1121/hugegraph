@@ -27,7 +27,6 @@ import com.baidu.hugegraph.HugeGraphParams;
 import com.baidu.hugegraph.backend.store.BackendStore;
 import com.baidu.hugegraph.backend.store.BackendStoreProvider;
 import com.baidu.hugegraph.event.EventListener;
-import com.baidu.hugegraph.util.E;
 import com.baidu.hugegraph.util.Log;
 
 public class RaftBackendStoreProvider implements BackendStoreProvider {
@@ -77,6 +76,7 @@ public class RaftBackendStoreProvider implements BackendStoreProvider {
             LOG.info("Init raft backend schema store");
             BackendStore store = this.provider.loadSchemaStore(name);
             this.schemaStore = new RaftBackendStore(store, this.context);
+            this.context.addStore(name, this.schemaStore);
         }
         return this.schemaStore;
     }
@@ -87,6 +87,7 @@ public class RaftBackendStoreProvider implements BackendStoreProvider {
             LOG.info("Init raft backend graph store");
             BackendStore store = this.provider.loadGraphStore(name);
             this.graphStore = new RaftBackendStore(store, this.context);
+            this.context.addStore(name, this.graphStore);
         }
         return this.graphStore;
     }
@@ -97,6 +98,7 @@ public class RaftBackendStoreProvider implements BackendStoreProvider {
             LOG.info("Init raft backend system store");
             BackendStore store = this.provider.loadSystemStore(name);
             this.systemStore = new RaftBackendStore(store, this.context);
+            this.context.addStore(name, this.systemStore);
         }
         return this.systemStore;
     }
@@ -108,13 +110,8 @@ public class RaftBackendStoreProvider implements BackendStoreProvider {
 
     @Override
     public void waitStoreStarted() {
-        E.checkState(this.schemaStore != null &&
-                     this.graphStore != null &&
-                     this.systemStore != null,
-                     "The store has not been opened");
-        this.schemaStore.waitStoreStarted();
-        this.graphStore.waitStoreStarted();
-        this.systemStore.waitStoreStarted();
+        this.context.initRaftNode();
+        this.context.waitRaftNodeStarted();
     }
 
     @Override

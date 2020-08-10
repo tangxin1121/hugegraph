@@ -22,6 +22,7 @@ package com.baidu.hugegraph.backend.store.raft;
 import java.io.File;
 import java.io.IOException;
 import java.nio.file.Paths;
+import java.util.Collection;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.BlockingQueue;
@@ -29,6 +30,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.RejectedExecutionHandler;
 import java.util.concurrent.SynchronousQueue;
 import java.util.concurrent.ThreadPoolExecutor;
+import java.util.stream.Collectors;
 
 import org.apache.commons.io.FileUtils;
 import org.slf4j.Logger;
@@ -45,6 +47,7 @@ import com.baidu.hugegraph.HugeException;
 import com.baidu.hugegraph.HugeGraphParams;
 import com.baidu.hugegraph.backend.id.Id;
 import com.baidu.hugegraph.backend.store.BackendStore;
+import com.baidu.hugegraph.backend.store.raft.RaftRequests.StoreType;
 import com.baidu.hugegraph.config.CoreOptions;
 import com.baidu.hugegraph.config.HugeConfig;
 import com.baidu.hugegraph.event.EventHub;
@@ -64,20 +67,30 @@ public final class RaftSharedContext {
     public static final int BUSY_SLEEP_FACTOR = 30 * 1000;
     public static final int WAIT_RPC_TIMEOUT = 30 * 60 * 1000;
 
+    private static final String DEFAULT_GROUP = "default-group";
+
     private final HugeGraphParams params;
-    private final Map<String, RaftNode> nodes;
+    private final String schemaStoreName;
+    private final String graphStoreName;
+    private final String systemStoreName;
+    private final Map<String, RaftBackendStore> stores;
     private final RpcServer rpcServer;
     @SuppressWarnings("unused")
     private final ExecutorService readIndexExecutor;
     private final ExecutorService snapshotExecutor;
     private final ExecutorService backendExecutor;
 
+    private RaftNode raftNode;
+
     public RaftSharedContext(HugeGraphParams params) {
         this.params = params;
-        this.nodes = new HashMap<>();
+        HugeConfig config = params.configuration();
+        this.schemaStoreName = config.get(CoreOptions.STORE_SCHEMA);
+        this.graphStoreName = config.get(CoreOptions.STORE_GRAPH);
+        this.systemStoreName = config.get(CoreOptions.STORE_SYSTEM);
+        this.stores = new HashMap<>();
         this.rpcServer = this.initAndStartRpcServer();
         this.readIndexExecutor = null;
-        HugeConfig config = params.configuration();
         if (config.get(CoreOptions.RAFT_USE_SNAPSHOT)) {
             this.snapshotExecutor = this.createSnapshotExecutor(4);
         } else {
@@ -85,31 +98,66 @@ public final class RaftSharedContext {
         }
         int backendThreads = config.get(CoreOptions.RAFT_BACKEND_THREADS);
         this.backendExecutor = this.createBackendExecutor(backendThreads);
+
+        this.raftNode = null;
+    }
+
+    public void initRaftNode() {
+        this.raftNode = new RaftNode(this);
+    }
+
+    public void waitRaftNodeStarted() {
+        RaftNode node = this.node();
+        node.waitLeaderElected(RaftSharedContext.WAIT_LEADER_TIMEOUT);
+        if (node.isLeader()) {
+            node.waitStarted(RaftSharedContext.NO_TIMEOUT);
+        }
     }
 
     public void close() {
         LOG.info("Stopping raft nodes");
-        this.nodes.values().forEach(RaftNode::shutdown);
         this.rpcServer.shutdown();
     }
 
-    public RaftNode node(String group) {
-        return this.nodes.get(group);
+    public RaftNode node() {
+        return this.raftNode;
     }
 
-    public void addNode(String group, BackendStore store) {
-        if (!this.nodes.containsKey(group)) {
-            synchronized (this.nodes) {
-                if (!this.nodes.containsKey(group)) {
-                    LOG.info("Initing raft node for '{}'", group);
-                    RaftNode node = new RaftNode(group, store, this);
-                    this.nodes.put(group, node);
-                }
-            }
+    public String group() {
+        return DEFAULT_GROUP;
+    }
+
+    public void addStore(String name, RaftBackendStore store) {
+        this.stores.put(name, store);
+    }
+
+    public StoreType storeType(String store) {
+        if (this.schemaStoreName.equals(store)) {
+            return StoreType.SCHEMA;
+        } else if (this.graphStoreName.equals(store)) {
+            return StoreType.GRAPH;
+        } else {
+            assert this.systemStoreName.equals(store);
+            return StoreType.SYSTEM;
         }
     }
 
-    public NodeOptions nodeOptions(String storePath) throws IOException {
+    public BackendStore originStore(StoreType storeType) {
+        if (storeType == StoreType.SCHEMA) {
+            return this.stores.get(this.schemaStoreName).originStore();
+        } else if (storeType == StoreType.GRAPH) {
+            return this.stores.get(this.graphStoreName).originStore();
+        } else {
+            return this.stores.get(this.systemStoreName).originStore();
+        }
+    }
+
+    public Collection<BackendStore> originStores() {
+        return this.stores.values().stream().map(RaftBackendStore::originStore)
+                          .collect(Collectors.toList());
+    }
+
+    public NodeOptions nodeOptions() throws IOException {
         HugeConfig config = this.config();
         PeerId selfId = new PeerId();
         selfId.parse(config.get(CoreOptions.RAFT_ENDPOINT));
@@ -131,17 +179,16 @@ public final class RaftSharedContext {
         nodeOptions.setInitialConf(groupPeers);
 
         String raftPath = config.get(CoreOptions.RAFT_PATH);
-        String logUri = Paths.get(raftPath, "log", storePath).toString();
+        String logUri = Paths.get(raftPath, "log").toString();
         FileUtils.forceMkdir(new File(logUri));
         nodeOptions.setLogUri(logUri);
 
-        String metaUri = Paths.get(raftPath, "meta", storePath).toString();
+        String metaUri = Paths.get(raftPath, "meta").toString();
         FileUtils.forceMkdir(new File(metaUri));
         nodeOptions.setRaftMetaUri(metaUri);
 
         if (config.get(CoreOptions.RAFT_USE_SNAPSHOT)) {
-            String snapshotUri = Paths.get(raftPath, "snapshot", storePath)
-                                      .toString();
+            String snapshotUri = Paths.get(raftPath, "snapshot").toString();
             FileUtils.forceMkdir(new File(snapshotUri));
             nodeOptions.setSnapshotUri(snapshotUri);
         }

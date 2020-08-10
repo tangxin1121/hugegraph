@@ -35,7 +35,6 @@ import com.alipay.sofa.jraft.Status;
 import com.alipay.sofa.jraft.closure.ReadIndexClosure;
 import com.alipay.sofa.jraft.core.NodeImpl;
 import com.alipay.sofa.jraft.core.Replicator.ReplicatorStateListener;
-import com.alipay.sofa.jraft.entity.NodeId;
 import com.alipay.sofa.jraft.entity.PeerId;
 import com.alipay.sofa.jraft.entity.Task;
 import com.alipay.sofa.jraft.error.RaftError;
@@ -45,8 +44,6 @@ import com.alipay.sofa.jraft.rpc.RpcResponseClosure;
 import com.alipay.sofa.jraft.util.BytesUtil;
 import com.alipay.sofa.jraft.util.Endpoint;
 import com.baidu.hugegraph.backend.BackendException;
-import com.baidu.hugegraph.backend.store.BackendStore;
-import com.baidu.hugegraph.backend.store.raft.RaftRequests.StoreAction;
 import com.baidu.hugegraph.backend.store.raft.RaftRequests.StoreCommandRequest;
 import com.baidu.hugegraph.backend.store.raft.RaftRequests.StoreCommandResponse;
 import com.baidu.hugegraph.util.CodeUtil;
@@ -59,21 +56,20 @@ public class RaftNode {
 
     private static final Logger LOG = Log.logger(RaftNode.class);
 
-    private final String group;
-    private final StoreStateMachine stateMachine;
+    private final RaftSharedContext context;
     private final Node node;
+    private final StoreStateMachine stateMachine;
 
     private final Object electedLock;
     private volatile boolean elected;
     private volatile boolean started;
     private final AtomicInteger busyCounter;
 
-    public RaftNode(String group, BackendStore store,
-                    RaftSharedContext context) {
-        this.group = group;
-        this.stateMachine = new StoreStateMachine(store, this, context);
+    public RaftNode(RaftSharedContext context) {
+        this.context = context;
+        this.stateMachine = new StoreStateMachine(context);
         try {
-            this.node = this.initRaftNode(store, context);
+            this.node = this.initRaftNode();
         } catch (IOException e) {
             throw new BackendException("Failed to init raft node", e);
         }
@@ -84,36 +80,40 @@ public class RaftNode {
         this.busyCounter = new AtomicInteger();
     }
 
-    public String group() {
-        return this.group;
+    public RaftSharedContext context() {
+        return this.context;
     }
 
     public Node node() {
         return this.node;
     }
 
-    public NodeId nodeId() {
-        return this.node.getNodeId();
+    public PeerId nodeId() {
+        return this.node.getNodeId().getPeerId();
+    }
+
+    public PeerId leaderId() {
+        return this.node.getLeaderId();
+    }
+
+    public boolean isLeader() {
+        return this.node.isLeader();
     }
 
     public void shutdown() {
         this.node.shutdown();
     }
 
-    private Node initRaftNode(BackendStore store, RaftSharedContext context)
-                              throws IOException {
-        String storePath = store.database() + "-" + store.store();
-        NodeOptions nodeOptions = context.nodeOptions(storePath);
+    private Node initRaftNode() throws IOException {
+        NodeOptions nodeOptions = this.context.nodeOptions();
         nodeOptions.setFsm(this.stateMachine);
 
-        // TODO: When support sharding, groupId needs to be bound to shard Id
-        String groupId = storePath;
-        PeerId endpoint = context.endpoint();
-
+        String groupId = this.context.group();
+        PeerId endpoint = this.context.endpoint();
         RaftGroupService raftGroupService;
         // Shared rpc server
         raftGroupService = new RaftGroupService(groupId, endpoint, nodeOptions,
-                                                context.rpcServer(), true);
+                                                this.context.rpcServer(), true);
         // Start node
         return raftGroupService.start(false);
     }
@@ -163,6 +163,7 @@ public class RaftNode {
     }
 
     protected void waitLeaderElected(int timeout) {
+        String group = this.context.group();
         if (this.node.getLeaderId() != null) {
             return;
         }
@@ -174,7 +175,7 @@ public class RaftNode {
                 } catch (InterruptedException e) {
                     throw new BackendException(
                               "Wait raft group '%s' election error",
-                              e, this.group(), "election");
+                              e, group, "election");
                 }
                 if (this.elected) {
                     break;
@@ -183,15 +184,16 @@ public class RaftNode {
                 if (timeout > 0 && consumedTime >= timeout) {
                     throw new BackendException(
                               "Wait raft group '{}' election timeout({}ms)",
-                              this.group(), "", consumedTime);
+                              group, "", consumedTime);
                 }
                 LOG.warn("Waiting raft group '{}' election cost {}s",
-                         this.group(), consumedTime / 1000.0);
+                         group, consumedTime / 1000.0);
             }
         }
     }
 
     protected void waitStarted(int timeout) {
+        String group = this.context.group();
         ReadIndexClosure readIndexClosure = new ReadIndexClosure() {
             @Override
             public void run(Status status, long index, byte[] reqCtx) {
@@ -218,10 +220,10 @@ public class RaftNode {
             if (timeout > 0 && consumedTime >= timeout) {
                 throw new BackendException(
                           "Wait raft group '{}' heartbeat timeout({}ms)",
-                          this.group(), consumedTime);
+                          group, consumedTime);
             }
             LOG.warn("Waiting raft group '{}' heartbeat cost {}s",
-                     this.group(), consumedTime / 1000.0);
+                     group, consumedTime / 1000.0);
         }
     }
 
@@ -258,8 +260,8 @@ public class RaftNode {
                   this.node.getNodeId(), leaderId);
 
         StoreCommandRequest.Builder builder = StoreCommandRequest.newBuilder();
-        builder.setGroupId(this.group);
-        builder.setAction(StoreAction.valueOf(command.action().code()));
+        builder.setType(command.type());
+        builder.setAction(command.action());
         builder.setData(ZeroByteStringHelper.wrap(command.data()));
         StoreCommandRequest request = builder.build();
 
@@ -303,6 +305,11 @@ public class RaftNode {
         } catch (ExecutionException e) {
             throw new BackendException("Failed to invoke rpc request", e);
         }
+    }
+
+    @Override
+    public String toString() {
+        return String.format("[%s-%s]", this.context.group(), this.nodeId());
     }
 
     private class RaftNodeStateListener implements ReplicatorStateListener {
