@@ -27,6 +27,7 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.RejectedExecutionHandler;
 import java.util.concurrent.SynchronousQueue;
 import java.util.concurrent.ThreadPoolExecutor;
@@ -226,8 +227,12 @@ public final class RaftSharedContext {
         } else {
             return;
         }
-        // How to avoid update cache from server info
-        eventHub.notify(Events.CACHE, "invalid", type, id);
+        try {
+            // How to avoid update cache from server info
+            eventHub.notify(Events.CACHE, "invalid", type, id);
+        } catch (RejectedExecutionException e) {
+            // pass
+        }
     }
 
     public PeerId endpoint() {
