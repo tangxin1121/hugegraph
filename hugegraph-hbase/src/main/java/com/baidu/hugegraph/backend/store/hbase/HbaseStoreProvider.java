@@ -27,7 +27,8 @@ import com.baidu.hugegraph.backend.store.hbase.HbaseStore.HbaseSchemaStore;
 public class HbaseStoreProvider extends AbstractBackendStoreProvider {
 
     protected String namespace() {
-        return this.graph().toLowerCase();
+        // HBase is case sensitive and should not be forced to lower case against the wishes of users
+        return this.graph();
     }
 
     @Override
